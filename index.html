@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Clash Test Summary Converter</title>
+<title>Clash Test Summary Converter (By Floor)</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root{
@@ -25,7 +25,7 @@
     justify-content:center;
     padding:40px 20px;
   }
-  .wrap{width:100%;max-width:760px;}
+  .wrap{width:100%;max-width:880px;}
   h1{
     font-size:22px;
     font-weight:700;
@@ -41,7 +41,7 @@
     background:var(--card);
     border:2px dashed var(--border);
     border-radius:10px;
-    padding:48px 24px;
+    padding:44px 24px;
     text-align:center;
     cursor:pointer;
     transition:border-color .15s, background .15s;
@@ -56,7 +56,6 @@
   input[type=file]{display:none;}
   .btn{
     display:inline-block;
-    margin-top:14px;
     padding:10px 22px;
     background:var(--navy);
     color:#fff;
@@ -76,10 +75,31 @@
   }
   .status.err{color:#B3261E;font-weight:700;}
   .status.ok{color:#1E7A34;font-weight:700;}
+  .actions{
+    margin-top:18px;
+    margin-bottom:8px;
+    display:flex;
+    gap:12px;
+    align-items:center;
+  }
+  .filename{
+    font-size:12px;
+    color:var(--muted);
+  }
+  .floor-section{
+    margin-top:28px;
+  }
+  .floor-title{
+    font-size:16px;
+    font-weight:700;
+    color:var(--navy-dark);
+    margin:0 0 8px;
+    padding-left:8px;
+    border-left:4px solid var(--navy);
+  }
   table{
     width:100%;
     border-collapse:collapse;
-    margin-top:26px;
     background:var(--card);
     border:1px solid var(--border);
     border-radius:8px;
@@ -102,15 +122,15 @@
     background:var(--accent);
     font-weight:700;
   }
-  .actions{
-    margin-top:22px;
-    display:flex;
-    gap:12px;
-    align-items:center;
-  }
-  .filename{
-    font-size:12px;
-    color:var(--muted);
+  .badge{
+    display:inline-block;
+    background:#EEF3F9;
+    color:var(--navy-dark);
+    font-size:11px;
+    padding:2px 7px;
+    border-radius:10px;
+    margin-left:8px;
+    font-weight:600;
   }
   footer{
     margin-top:36px;
@@ -122,8 +142,8 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>Clash test summary converter</h1>
-  <p class="sub">Drop a Navisworks clash report XML export below to generate a clean summary Excel file — total, new, active, reviewed, approved, and resolved counts per test.</p>
+  <h1>Clash test summary converter (by floor)</h1>
+  <p class="sub">Drop a Navisworks clash report XML export with clash groups below to generate summary tables broken down by floor and export to Excel.</p>
 
   <div class="dropzone" id="dropzone">
     <p class="dz-title">Drag &amp; drop XML file here</p>
@@ -134,28 +154,12 @@
   <div class="status" id="status"></div>
 
   <div id="previewWrap" style="display:none;">
-    <table id="previewTable">
-      <thead>
-        <tr>
-          <th>Clash test</th>
-          <th>Test type</th>
-          <th>Status</th>
-          <th>Total</th>
-          <th>New</th>
-          <th>Active</th>
-          <th>Reviewed</th>
-          <th>Approved</th>
-          <th>Resolved</th>
-        </tr>
-      </thead>
-      <tbody id="previewBody"></tbody>
-      <tfoot id="previewFoot"></tfoot>
-    </table>
-
     <div class="actions">
       <button class="btn" id="downloadBtn">Download Excel</button>
       <span class="filename" id="outName"></span>
     </div>
+
+    <div id="tablesContainer"></div>
   </div>
 
   <footer>Runs entirely in your browser. No file is uploaded anywhere.</footer>
@@ -166,13 +170,12 @@ const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
 const statusEl = document.getElementById('status');
 const previewWrap = document.getElementById('previewWrap');
-const previewBody = document.getElementById('previewBody');
-const previewFoot = document.getElementById('previewFoot');
+const tablesContainer = document.getElementById('tablesContainer');
 const downloadBtn = document.getElementById('downloadBtn');
 const outName = document.getElementById('outName');
 
-let currentRows = [];
-let currentSourceName = 'Clash_Test_Summary';
+let parsedData = null;
+let currentSourceName = 'Clash_Test_Summary_By_Floor';
 
 dropzone.addEventListener('click', () => fileInput.click());
 dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('drag'); });
@@ -196,7 +199,7 @@ function handleFile(file) {
     setStatus('Please drop a .xml file exported from Navisworks (Report > Export).', 'err');
     return;
   }
-  currentSourceName = file.name.replace(/\.xml$/i, '') + '_Summary';
+  currentSourceName = file.name.replace(/\.xml$/i, '') + '_By_Floor';
   setStatus('Reading ' + file.name + ' ...');
   const reader = new FileReader();
   reader.onload = evt => parseXml(evt.target.result);
@@ -204,65 +207,217 @@ function handleFile(file) {
   reader.readAsText(file);
 }
 
+// Extract floor name from clashgroup name (e.g., "11.11 TH FLOOR : B-4" -> "11.11 TH FLOOR")
+function extractFloorName(groupName) {
+  if (!groupName) return 'Unassigned Floor';
+  const colonIdx = groupName.indexOf(':');
+  const raw = colonIdx !== -1 ? groupName.substring(0, colonIdx).trim() : groupName.trim();
+  return raw || 'Unassigned Floor';
+}
+
+// Custom sort order for building levels (Subcellar -> OG Cellar -> Cellar -> 01..12 -> Roof)
+function compareFloors(a, b) {
+  const getRank = (name) => {
+    const upper = name.toUpperCase();
+    if (upper.includes('SUBCELLAR')) return -30;
+    if (upper.startsWith('OG')) return -20;
+    if (upper.includes('CELLAR') && !upper.startsWith('00')) return -15;
+    const numMatch = upper.match(/^(\d+(?:\.\d+)?)/);
+    if (numMatch) return parseFloat(numMatch[1]);
+    if (upper.includes('ROOF')) return 999;
+    return 500;
+  };
+  const rankA = getRank(a);
+  const rankB = getRank(b);
+  if (rankA !== rankB) return rankA - rankB;
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+}
+
 function parseXml(text) {
-  let rows = [];
   try {
     const doc = new DOMParser().parseFromString(text, 'application/xml');
     const parseErr = doc.querySelector('parsererror');
-    if (parseErr) throw new Error('Invalid XML');
+    if (parseErr) throw new Error('Invalid or truncated XML file.');
 
     const clashtests = doc.querySelectorAll('clashtest');
-    if (!clashtests.length) throw new Error('No clashtest elements found. Is this a Navisworks clash report export?');
+    if (!clashtests.length) {
+      throw new Error('No <clashtest> elements found. Is this a Navisworks clash report export?');
+    }
+
+    const overallRows = [];
+    const floorMap = new Map(); // floorName -> Map(testName -> rowObj)
+    const testMetaList = [];
 
     clashtests.forEach(ct => {
-      const name = ct.getAttribute('name') || '';
-      const summary = ct.querySelector('summary');
-      if (!summary) return;
-      const testtypeEl = summary.querySelector('testtype');
-      const teststatusEl = summary.querySelector('teststatus');
-      rows.push({
-        name: name,
-        testtype: testtypeEl ? testtypeEl.textContent : (ct.getAttribute('test_type') || ''),
-        status: teststatusEl ? teststatusEl.textContent : (ct.getAttribute('status') || ''),
-        total: parseInt(summary.getAttribute('total') || '0', 10),
-        new: parseInt(summary.getAttribute('new') || '0', 10),
-        active: parseInt(summary.getAttribute('active') || '0', 10),
-        reviewed: parseInt(summary.getAttribute('reviewed') || '0', 10),
-        approved: parseInt(summary.getAttribute('approved') || '0', 10),
-        resolved: parseInt(summary.getAttribute('resolved') || '0', 10)
-      });
+      const testName = ct.getAttribute('name') || 'Unnamed Test';
+      const summary = ct.querySelector(':scope > summary');
+      const testtypeEl = summary ? summary.querySelector('testtype') : null;
+      const teststatusEl = summary ? summary.querySelector('teststatus') : null;
+
+      const testType = testtypeEl ? testtypeEl.textContent.trim() : (ct.getAttribute('test_type') || '');
+      const status = teststatusEl ? teststatusEl.textContent.trim() : (ct.getAttribute('status') || '');
+
+      testMetaList.push({ name: testName, testtype: testType, status: status });
+
+      // Overall summary row (from <summary> if available, else computed)
+      const overallRow = {
+        name: testName,
+        testtype: testType,
+        status: status,
+        groups: 0,
+        total: summary ? parseInt(summary.getAttribute('total') || '0', 10) : 0,
+        new: summary ? parseInt(summary.getAttribute('new') || '0', 10) : 0,
+        active: summary ? parseInt(summary.getAttribute('active') || '0', 10) : 0,
+        reviewed: summary ? parseInt(summary.getAttribute('reviewed') || '0', 10) : 0,
+        approved: summary ? parseInt(summary.getAttribute('approved') || '0', 10) : 0,
+        resolved: summary ? parseInt(summary.getAttribute('resolved') || '0', 10) : 0
+      };
+
+      const topClashResults = ct.querySelector(':scope > clashresults');
+      let computedTotal = 0;
+
+      if (topClashResults) {
+        // Process <clashgroup> elements
+        const clashGroups = topClashResults.querySelectorAll(':scope > clashgroup');
+        overallRow.groups = clashGroups.length;
+
+        clashGroups.forEach(cg => {
+          const groupName = cg.getAttribute('name') || '';
+          const floorName = extractFloorName(groupName);
+          const groupStatus = (cg.getAttribute('status') || '').toLowerCase();
+
+          if (!floorMap.has(floorName)) {
+            floorMap.set(floorName, new Map());
+          }
+          const testMapForFloor = floorMap.get(floorName);
+          if (!testMapForFloor.has(testName)) {
+            testMapForFloor.set(testName, {
+              name: testName,
+              testtype: testType,
+              status: status,
+              groups: 0,
+              total: 0,
+              new: 0,
+              active: 0,
+              reviewed: 0,
+              approved: 0,
+              resolved: 0
+            });
+          }
+
+          const row = testMapForFloor.get(testName);
+          row.groups += 1;
+
+          const results = cg.querySelectorAll('clashresult');
+          if (results.length > 0) {
+            results.forEach(cr => {
+              const crStatus = (cr.getAttribute('status') || groupStatus || 'new').toLowerCase();
+              row.total += 1;
+              computedTotal += 1;
+              if (crStatus === 'active') row.active += 1;
+              else if (crStatus === 'reviewed') row.reviewed += 1;
+              else if (crStatus === 'approved') row.approved += 1;
+              else if (crStatus === 'resolved') row.resolved += 1;
+              else row.new += 1;
+            });
+          } else {
+            // Empty clashgroup fallback
+            row.total += 1;
+            computedTotal += 1;
+            if (groupStatus === 'active') row.active += 1;
+            else if (groupStatus === 'reviewed') row.reviewed += 1;
+            else if (groupStatus === 'approved') row.approved += 1;
+            else if (groupStatus === 'resolved') row.resolved += 1;
+            else row.new += 1;
+          }
+        });
+
+        // Also handle any ungrouped <clashresult> directly under <clashtest>/<clashresults>
+        const ungroupedResults = topClashResults.querySelectorAll(':scope > clashresult');
+        if (ungroupedResults.length > 0) {
+          const floorName = 'Ungrouped';
+          if (!floorMap.has(floorName)) floorMap.set(floorName, new Map());
+          const testMapForFloor = floorMap.get(floorName);
+          if (!testMapForFloor.has(testName)) {
+            testMapForFloor.set(testName, {
+              name: testName, testtype: testType, status: status,
+              groups: 0, total: 0, new: 0, active: 0, reviewed: 0, approved: 0, resolved: 0
+            });
+          }
+          const row = testMapForFloor.get(testName);
+          ungroupedResults.forEach(cr => {
+            const crStatus = (cr.getAttribute('status') || 'new').toLowerCase();
+            row.total += 1;
+            computedTotal += 1;
+            if (crStatus === 'active') row.active += 1;
+            else if (crStatus === 'reviewed') row.reviewed += 1;
+            else if (crStatus === 'approved') row.approved += 1;
+            else if (crStatus === 'resolved') row.resolved += 1;
+            else row.new += 1;
+          });
+        }
+      }
+
+      if (!summary && computedTotal > 0) {
+        overallRow.total = computedTotal;
+      }
+      overallRows.push(overallRow);
     });
 
-    if (!rows.length) throw new Error('No clash test summaries could be parsed from this file.');
+    if (!overallRows.length) {
+      throw new Error('No clash tests could be parsed from this file.');
+    }
+
+    const sortedFloors = Array.from(floorMap.keys()).sort(compareFloors);
+    const floorSections = sortedFloors.map(floorName => {
+      const testMap = floorMap.get(floorName);
+      // Keep tests in the same order they appear in the XML, only including tests with clashes on this floor
+      const rows = [];
+      testMetaList.forEach(meta => {
+        if (testMap.has(meta.name)) {
+          rows.push(testMap.get(meta.name));
+        }
+      });
+      return { floorName, rows };
+    });
+
+    parsedData = { overallRows, floorSections };
+    renderPreview(parsedData);
+
+    const totalClashes = floorSections.reduce(
+      (sum, f) => sum + f.rows.reduce((s, r) => s + r.total, 0), 0
+    );
+    setStatus(
+      `Parsed ${overallRows.length} clash test(s) across ${floorSections.length} floor(s) (${totalClashes} grouped clashes).`,
+      'ok'
+    );
   } catch (err) {
     setStatus('Error: ' + err.message, 'err');
     previewWrap.style.display = 'none';
-    return;
+    parsedData = null;
   }
-
-  currentRows = rows;
-  renderPreview(rows);
-  setStatus('Parsed ' + rows.length + ' clash test' + (rows.length === 1 ? '' : 's') + '.', 'ok');
 }
 
-function renderPreview(rows) {
-  previewBody.innerHTML = '';
-  const totals = { total:0, new:0, active:0, reviewed:0, approved:0, resolved:0 };
+function buildTableHtml(title, badgeText, rows) {
+  const totals = { groups:0, total:0, new:0, active:0, reviewed:0, approved:0, resolved:0 };
+  let bodyHtml = '';
 
   rows.forEach(r => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${escapeHtml(r.name)}</td>
-      <td>${escapeHtml(r.testtype)}</td>
-      <td>${escapeHtml(r.status)}</td>
-      <td>${r.total}</td>
-      <td>${r.new}</td>
-      <td>${r.active}</td>
-      <td>${r.reviewed}</td>
-      <td>${r.approved}</td>
-      <td>${r.resolved}</td>
+    bodyHtml += `
+      <tr>
+        <td>${escapeHtml(r.name)}</td>
+        <td>${escapeHtml(r.testtype)}</td>
+        <td>${escapeHtml(r.status)}</td>
+        <td>${r.groups}</td>
+        <td>${r.total}</td>
+        <td>${r.new}</td>
+        <td>${r.active}</td>
+        <td>${r.reviewed}</td>
+        <td>${r.approved}</td>
+        <td>${r.resolved}</td>
+      </tr>
     `;
-    previewBody.appendChild(tr);
+    totals.groups += r.groups;
     totals.total += r.total;
     totals.new += r.new;
     totals.active += r.active;
@@ -271,18 +426,59 @@ function renderPreview(rows) {
     totals.resolved += r.resolved;
   });
 
-  previewFoot.innerHTML = `
-    <tr>
-      <td>TOTAL</td><td></td><td></td>
-      <td>${totals.total}</td>
-      <td>${totals.new}</td>
-      <td>${totals.active}</td>
-      <td>${totals.reviewed}</td>
-      <td>${totals.approved}</td>
-      <td>${totals.resolved}</td>
-    </tr>
+  return `
+    <div class="floor-section">
+      <div class="floor-title">
+        ${escapeHtml(title)}
+        <span class="badge">${escapeHtml(badgeText)}</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Clash test</th>
+            <th>Test type</th>
+            <th>Status</th>
+            <th>Groups</th>
+            <th>Total</th>
+            <th>New</th>
+            <th>Active</th>
+            <th>Reviewed</th>
+            <th>Approved</th>
+            <th>Resolved</th>
+          </tr>
+        </thead>
+        <tbody>${bodyHtml}</tbody>
+        <tfoot>
+          <tr>
+            <td>TOTAL</td><td></td><td></td>
+            <td>${totals.groups}</td>
+            <td>${totals.total}</td>
+            <td>${totals.new}</td>
+            <td>${totals.active}</td>
+            <td>${totals.reviewed}</td>
+            <td>${totals.approved}</td>
+            <td>${totals.resolved}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
   `;
+}
 
+function renderPreview(data) {
+  let html = '';
+
+  // 1. Overall Summary Table
+  const overallTotal = data.overallRows.reduce((s, r) => s + r.total, 0);
+  html += buildTableHtml('Overall Clash Report Summary', `${overallTotal} clashes`, data.overallRows);
+
+  // 2. Per-Floor Tables
+  data.floorSections.forEach(sec => {
+    const floorTotal = sec.rows.reduce((s, r) => s + r.total, 0);
+    html += buildTableHtml(sec.floorName, `${floorTotal} clashes`, sec.rows);
+  });
+
+  tablesContainer.innerHTML = html;
   outName.textContent = currentSourceName + '.xlsx';
   previewWrap.style.display = 'block';
 }
@@ -293,15 +489,21 @@ function escapeHtml(str) {
   return d.innerHTML;
 }
 
-downloadBtn.addEventListener('click', () => {
-  if (!currentRows.length) return;
+function createStyledSheet(rows, sectionTitle = null) {
+  const headers = ['Clash Test','Test Type','Status','Groups','Total','New','Active','Reviewed','Approved','Resolved'];
+  const totals = { groups:0, total:0, new:0, active:0, reviewed:0, approved:0, resolved:0 };
+  const aoa = [];
+  let headerRowIdx = 0;
 
-  const headers = ['Clash Test','Test Type','Status','Total','New','Active','Reviewed','Approved','Resolved'];
-  const totals = { total:0, new:0, active:0, reviewed:0, approved:0, resolved:0 };
-  const aoa = [headers];
+  if (sectionTitle) {
+    aoa.push([sectionTitle]);
+    headerRowIdx = 1;
+  }
+  aoa.push(headers);
 
-  currentRows.forEach(r => {
-    aoa.push([r.name, r.testtype, r.status, r.total, r.new, r.active, r.reviewed, r.approved, r.resolved]);
+  rows.forEach(r => {
+    aoa.push([r.name, r.testtype, r.status, r.groups, r.total, r.new, r.active, r.reviewed, r.approved, r.resolved]);
+    totals.groups += r.groups;
     totals.total += r.total;
     totals.new += r.new;
     totals.active += r.active;
@@ -309,14 +511,23 @@ downloadBtn.addEventListener('click', () => {
     totals.approved += r.approved;
     totals.resolved += r.resolved;
   });
-  aoa.push(['TOTAL','','', totals.total, totals.new, totals.active, totals.reviewed, totals.approved, totals.resolved]);
+
+  aoa.push(['TOTAL','','', totals.groups, totals.total, totals.new, totals.active, totals.reviewed, totals.approved, totals.resolved]);
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [{wch:24},{wch:20},{wch:10},{wch:9},{wch:8},{wch:9},{wch:10},{wch:10},{wch:10}];
+  ws['!cols'] = [
+    {wch:26},{wch:22},{wch:10},{wch:9},{wch:9},{wch:8},{wch:9},{wch:10},{wch:10},{wch:10}
+  ];
 
   const range = XLSX.utils.decode_range(ws['!ref']);
   for (let C = range.s.c; C <= range.e.c; C++) {
-    const headerCell = XLSX.utils.encode_cell({r:0, c:C});
+    if (sectionTitle) {
+      const titleCell = XLSX.utils.encode_cell({r:0, c:C});
+      if (ws[titleCell]) {
+        ws[titleCell].s = { font: { bold: true, sz: 13, color: { rgb: '123049' } } };
+      }
+    }
+    const headerCell = XLSX.utils.encode_cell({r:headerRowIdx, c:C});
     if (ws[headerCell]) {
       ws[headerCell].s = {
         font: { bold: true, color: { rgb: 'FFFFFF' } },
@@ -333,9 +544,114 @@ downloadBtn.addEventListener('click', () => {
       };
     }
   }
+  return ws;
+}
+
+function createCombinedFloorsSheet(floorSections) {
+  const headers = ['Clash Test','Test Type','Status','Groups','Total','New','Active','Reviewed','Approved','Resolved'];
+  const aoa = [];
+  const headerRows = [];
+  const totalRows = [];
+  const titleRows = [];
+
+  floorSections.forEach((sec, idx) => {
+    if (idx > 0) aoa.push([]); // Blank separator row
+    titleRows.push(aoa.length);
+    aoa.push([sec.floorName]);
+
+    headerRows.push(aoa.length);
+    aoa.push(headers);
+
+    const totals = { groups:0, total:0, new:0, active:0, reviewed:0, approved:0, resolved:0 };
+    sec.rows.forEach(r => {
+      aoa.push([r.name, r.testtype, r.status, r.groups, r.total, r.new, r.active, r.reviewed, r.approved, r.resolved]);
+      totals.groups += r.groups;
+      totals.total += r.total;
+      totals.new += r.new;
+      totals.active += r.active;
+      totals.reviewed += r.reviewed;
+      totals.approved += r.approved;
+      totals.resolved += r.resolved;
+    });
+
+    totalRows.push(aoa.length);
+    aoa.push(['TOTAL','','', totals.groups, totals.total, totals.new, totals.active, totals.reviewed, totals.approved, totals.resolved]);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [
+    {wch:26},{wch:22},{wch:10},{wch:9},{wch:9},{wch:8},{wch:9},{wch:10},{wch:10},{wch:10}
+  ];
+
+  titleRows.forEach(r => {
+    const cell = XLSX.utils.encode_cell({r, c:0});
+    if (ws[cell]) ws[cell].s = { font: { bold: true, sz: 12, color: { rgb: '123049' } } };
+  });
+
+  headerRows.forEach(r => {
+    for (let c = 0; c < headers.length; c++) {
+      const cell = XLSX.utils.encode_cell({r, c});
+      if (ws[cell]) {
+        ws[cell].s = {
+          font: { bold: true, color: { rgb: 'FFFFFF' } },
+          fill: { fgColor: { rgb: '1F4E78' } },
+          alignment: { horizontal: 'center', vertical: 'center' }
+        };
+      }
+    }
+  });
+
+  totalRows.forEach(r => {
+    for (let c = 0; c < headers.length; c++) {
+      const cell = XLSX.utils.encode_cell({r, c});
+      if (ws[cell]) {
+        ws[cell].s = {
+          font: { bold: true },
+          fill: { fgColor: { rgb: 'D9E1F2' } }
+        };
+      }
+    }
+  });
+
+  return ws;
+}
+
+function sanitizeSheetName(name, usedNames) {
+  // Excel tab limit is 31 chars and forbids \ / ? * [ ] :
+  let clean = name.replace(/[\\/?*\[\]:]/g, '-').trim() || 'Sheet';
+  if (clean.length > 31) clean = clean.substring(0, 31).trim();
+  let candidate = clean;
+  let counter = 2;
+  while (usedNames.has(candidate.toLowerCase())) {
+    const suffix = ` (${counter++})`;
+    candidate = clean.substring(0, 31 - suffix.length) + suffix;
+  }
+  usedNames.add(candidate.toLowerCase());
+  return candidate;
+}
+
+downloadBtn.addEventListener('click', () => {
+  if (!parsedData) return;
 
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Clash Summary');
+  const usedNames = new Set();
+
+  // Sheet 1: Overall Summary
+  const wsOverall = createStyledSheet(parsedData.overallRows, 'Overall Clash Report Summary');
+  XLSX.utils.book_append_sheet(wb, wsOverall, sanitizeSheetName('Overall Summary', usedNames));
+
+  // Sheet 2: All Floors Stacked on One Sheet
+  if (parsedData.floorSections.length > 0) {
+    const wsAllFloors = createCombinedFloorsSheet(parsedData.floorSections);
+    XLSX.utils.book_append_sheet(wb, wsAllFloors, sanitizeSheetName('All Floors Combined', usedNames));
+  }
+
+  // Sheets 3+: Individual Floor Tabs
+  parsedData.floorSections.forEach(sec => {
+    const wsFloor = createStyledSheet(sec.rows, sec.floorName);
+    XLSX.utils.book_append_sheet(wb, wsFloor, sanitizeSheetName(sec.floorName, usedNames));
+  });
+
   XLSX.writeFile(wb, currentSourceName + '.xlsx');
 });
 </script>
